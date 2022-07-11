@@ -1,39 +1,50 @@
 AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  This stack contains the AWS Francesca serverless application
+
 Resources:
-  LambdaFunction:
+
+  FrancescaFunction:
     Type: 'AWS::Lambda::Function'
     Properties:
       Code:
         ZipFile: |
-          console.log('Loading DynamoDB Lambda function');
-          var AWS = require('aws-sdk');
-          var dynamo = new AWS.DynamoDB.DocumentClient();
-          exports.handler = function(event, context, callback) {
-          //console.log('Received event:', JSON.stringify(event, null, 2));
-          var operation = event.operation;
-          if (event.tableName) {
-            event.payload.TableName = event.tableName;
-          }
-          switch (operation) {
-                case 'create':
-                    dynamo.put(event.payload, callback);
-                    break;
-                case 'read':
-                    dynamo.get(event.payload, callback);
-                    break;
-                case 'update':
-                    dynamo.update(event.payload, callback);
-                    break;
-                case 'delete':
-                    dynamo.delete(event.payload, callback);
-                    break;
-                case 'list':
-                    dynamo.scan(event.payload, callback);
-                    break;
-                default:
-                    callback('Unknown operation: ${operation}');
-          }
+        
+          const AWS = require('aws-sdk');
+          
+          exports.handler = async (event) => {
+            const dynamodbDocument = new AWS.DynamoDB.DocumentClient({apiVersion: '2012-08-10'})
+            console.info(JSON.stringify(event));
+          
+            // Dispatcher logic - START
+            
+            const requestType = `${event.resource}#${event.httpMethod}`;
+            let result = {};
+            switch (requestType) {
+              case `${event.tableName}#GET`: {
+                const params = {
+                  TableName: `${event.tableName}`
+                };
+                const ddbResult = await dynamodbDocument.scan(params).promise();
+                result = ddbResult['Items'];
+                console.info(`GET ${event.tableName} - ` + JSON.stringify(result));
+                break;
+              }
+              default:
+                console.info('REQUEST NOT FOUND');
+            }
+        
+            // Dispatcher logic - END
+
+            const response = {
+              statusCode: 200,
+              body: JSON.stringify(result),
+            };
+            return response;
           };
+          
+      Description: 'A simple test request methods function'  
       FunctionName:
         Ref: LambdaFuncName
       Handler: index.handler
@@ -41,6 +52,7 @@ Resources:
       Role: !GetAtt IAMRole.Arn
     DependsOn:
       - DynamoDBTable
+
   DynamoDBTable:
     Type: 'AWS::DynamoDB::Table'
     Properties:
@@ -53,17 +65,52 @@ Resources:
         - AttributeName: id
           KeyType: HASH
       ProvisionedThroughput:
-        ReadCapacityUnits: '5'
-        WriteCapacityUnits: '5'
+        ReadCapacityUnits: '1'
+        WriteCapacityUnits: '1'
     DependsOn:
       - IAMRole
+
   APIGatewayRestAPI:
     Type: 'AWS::ApiGateway::RestApi'
     Properties:
       Name:
         Ref: APIName
+      Description: 'API used for test request methods'
+      FailOnWarnings: true
+      Body:
+        swagger: "2.0"
+          info:
+            version: "1.0.0"
+            title: "Francesca Test API"
+          basePath: "/"
+          schemes:
+          - "https"
+          - "http"
+          paths:
+            /${event.tableName}
+              get:
+                produces:
+                - "application/json"
+                parameters:
+                - name: "name"
+                - in: "query"
+                - required: false
+                - type: "string"
+                responses:
+                  "200":
+                    description: "successful operation"
+                x-amazon-apigateway-integration:
+                  type: aws_proxy
+                  contentHandling: CONVERT_TO_TEXT
+                  httpMethod: POST
+                  passthroughBehavior: when_no_match
+                  uri: 
+                    Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:AWB_C001-${Environment}_workshop_manager:awb/invocations
+                  security:
+                  - api_key: []
     DependsOn:
       - LambdaFunction
+  
   APIGatewayResource:
     Type: 'AWS::ApiGateway::Resource'
     Properties:
@@ -75,6 +122,7 @@ Resources:
         Ref: LambdaFuncName
     DependsOn:
       - APIGatewayRestAPI
+      
   APIGatewayMethod:
     Type: 'AWS::ApiGateway::Method'
     Properties:
@@ -95,6 +143,7 @@ Resources:
           - LambdaFuncNameArn: !GetAtt LambdaFunction.Arn
     DependsOn:
       - APIGatewayResource
+      
   APIGatewayDeployment:
     Type: 'AWS::ApiGateway::Deployment'
     Properties:
@@ -103,6 +152,7 @@ Resources:
         Ref: EnvironmentName
     DependsOn:
       - APIGatewayMethod
+      
   APIGatewayPermission:
     Type: 'AWS::Lambda::Permission'
     Properties:
@@ -111,6 +161,7 @@ Resources:
       Principal: apigateway.amazonaws.com
     DependsOn:
       - APIGatewayDeployment
+
   IAMRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -118,37 +169,54 @@ Resources:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
+            Action:
+            - sts:AssumeRole
             Principal:
               Service:
                 - lambda.amazonaws.com
+                - apigateway.amazonaws.com
             Action:
               - 'sts:AssumeRole'
       Path: /
-      Policies:
-        - PolicyName: Policy_api-lambda-db
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - 'dynamodb:BatchGetItem'
-                  - 'dynamodb:BatchWriteItem'
-                  - 'dynamodb:TagResource'
-                  - 'dynamodb:UntagResource'
-                  - 'dynamodb:PutItem'
-                  - 'dynamodb:DeleteItem'
-                  - 'dynamodb:GetItem'
-                  - 'dynamodb:Scan'
-                  - 'dynamodb:Query'
-                  - 'dynamodb:UpdateItem'
-                Resource: '*'
-              - Effect: Allow
-                Action:
-                  - 'logs:CreateLogStream'
-                  - 'logs:CreateLogGroup'
-                  - 'logs:PutLogEvents'
-                Resource: '*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref CustomExecutionPolicy
+        
+  CustomExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowDDBAccess
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Scan
+              - dynamodb:Query
+              - dynamodb:DeleteItem
+            Resource: '*'
+            
 Parameters:
+
+  ApiCorsAllowed:
+    Type: String
+    Description: CORS API
+    
+  Environment:
+    Type: String
+    Description: Name of the environment
+    AllowedValues:
+      - stage
+      - prep
+      - prod
+    ConstraintDescription: One value among "stage","prep","prod"
+    
+  AccountId:
+    Type: String
+    Description: AWS Account Id
+    
   LambdaFuncName:
     Type: String
     Default: Lambda_api-lambda-db
@@ -161,3 +229,14 @@ Parameters:
   EnvironmentName:
     Type: String
     Default: Prod
+    
+Globals:
+
+  Function:
+    # "Global" properties of AWS::Serverless::Function resources
+    Runtime: nodejs12.x
+    Handler: index.handler
+    Environment:
+      Variables:
+        stage: !Ref Environment
+        logLevel: !FindInMap [EnvMap, !Ref Environment, logLevel]
